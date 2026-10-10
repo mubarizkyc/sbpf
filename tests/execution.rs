@@ -561,11 +561,7 @@ fn test_pqr_v0() {
     prog[17] = 1; // dst = R1
     prog[33] = 16; // src = R1
     prog[40] = ebpf::EXIT;
-    let config = Config {
-        enable_register_tracing: true,
-        ..Config::default()
-    };
-    let loader = Arc::new(BuiltinProgram::new_loader(config));
+    let loader = Arc::new(BuiltinProgram::new_loader(Config::default()));
     for (opc, dst, src, expected_result) in [
         (ebpf::DIV32_IMM, 13u64, 4u64, 3u64),
         (ebpf::DIV64_IMM, 13u64, 4u64, 3u64),
@@ -658,11 +654,7 @@ fn test_pqr_v2() {
     prog[33] = 1; // dst = R1
     prog[41] = 16; // src = R1
     prog[48] = ebpf::EXIT;
-    let config = Config {
-        enable_register_tracing: true,
-        ..Config::default()
-    };
-    let loader = Arc::new(BuiltinProgram::new_loader(config));
+    let loader = Arc::new(BuiltinProgram::new_loader(Config::default()));
     for (opc, dst, src, expected_result) in [
         (ebpf::UHMUL64_IMM, 13u64, 4u64, 0u64),
         (ebpf::UDIV32_IMM, 13u64, 4u64, 3u64),
@@ -828,11 +820,7 @@ fn test_err_pqr_divide_by_zero() {
     prog[1] = 10;
     prog[8] = ebpf::MOV32_IMM;
     prog[24] = ebpf::EXIT;
-    let config = Config {
-        enable_register_tracing: true,
-        ..Config::default()
-    };
-    let loader = Arc::new(BuiltinProgram::new_loader(config));
+    let loader = Arc::new(BuiltinProgram::new_loader(Config::default()));
     for opc in [
         ebpf::UDIV32_REG,
         ebpf::UDIV64_REG,
@@ -1205,6 +1193,54 @@ fn test_err_ldxdw_nomem() {
             8,
             "unallocated"
         )),
+    );
+}
+
+#[test]
+fn test_err_ldxdw_nomem_capped() {
+    // The access violation would only be detected after running out of budget.
+    test_interpreter_and_jit_asm!(
+        "
+        add64 r10, 0
+        ldxdw r0, [r1+6]
+        exit",
+        NO_INPUT,
+        TestContextObject::new(1),
+        ProgramResult::Err(EbpfError::ExceededMaxInstructions),
+    );
+}
+
+#[test]
+fn test_memory_access_preserves_registers() {
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r0, 0x1
+        mov64 r1, 0x2
+        mov64 r2, 0x4
+        mov64 r3, 0x8
+        mov64 r4, 0x10
+        mov64 r5, 0x20
+        mov64 r6, 0x40
+        mov64 r7, 0x80
+        mov64 r8, 0x100
+        mov64 r9, 0x200
+        stxdw [r10-8], r9
+        stdw [r10-16], 0x400
+        ldxdw r9, [r10-8]
+        ldxdw r9, [r10-16]
+        add64 r0, r1
+        add64 r0, r2
+        add64 r0, r3
+        add64 r0, r4
+        add64 r0, r5
+        add64 r0, r6
+        add64 r0, r7
+        add64 r0, r8
+        add64 r0, r9
+        exit",
+        NO_INPUT,
+        TestContextObject::new(24),
+        ProgramResult::Ok(0x5ff),
     );
 }
 
@@ -1614,6 +1650,77 @@ fn test_ja() {
 }
 
 #[test]
+fn test_alu64_imm_sign_extension() {
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r0, 0
+        or64 r0, -1
+        mov64 r1, -1
+        and64 r1, -2
+        mov64 r2, 0
+        xor64 r2, -4
+        add64 r0, r1
+        add64 r0, r2
+        exit",
+        NO_INPUT,
+        TestContextObject::new(9),
+        ProgramResult::Ok(-7i64 as u64),
+    );
+}
+
+#[test]
+fn test_instruction_meter_checkpoint() {
+    // Without checkpoints, all of the stores would be executed before the meter is checked at the
+    // `exit`.
+    let config = Config {
+        instruction_meter_checkpoint_distance: 1,
+        ..Config::default()
+    };
+    let mut input = [0u8; 4];
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r0, 0
+        stb [r1+0], 1
+        stb [r1+1], 2
+        stb [r1+2], 3
+        stb [r1+3], 4
+        exit",
+        config,
+        &raw mut input,
+        TestContextObject::new(3),
+        ProgramResult::Err(EbpfError::ExceededMaxInstructions),
+    );
+}
+
+#[test]
+fn test_noop_insertion() {
+    let config = Config {
+        noop_instruction_rate: 1,
+        ..Config::default()
+    };
+    // The no-ops are inserted at random.
+    for _ in 0..16 {
+        test_interpreter_and_jit_asm!(
+            "
+            mov64 r0, 0
+            mov64 r1, 0
+            lddw r2, 0x100000000
+            add64 r1, 1
+            call function_foo
+            jlt r1, 10, -3
+            exit
+            function_foo:
+            add64 r0, r2
+            exit",
+            config.clone(),
+            NO_INPUT,
+            TestContextObject::new(54),
+            ProgramResult::Ok(0xa00000000),
+        );
+    }
+}
+
+#[test]
 fn test_conditional_jumps() {
     const THEN: u32 = 0x5448454E;
     const ELSE: u32 = 0x454C5345;
@@ -1632,11 +1739,7 @@ fn test_conditional_jumps() {
     prog[64] = ebpf::MOV32_IMM;
     LittleEndian::write_u32(&mut prog[68..], THEN);
     prog[72] = ebpf::EXIT;
-    let config = Config {
-        enable_register_tracing: true,
-        ..Config::default()
-    };
-    let loader = Arc::new(BuiltinProgram::new_loader(config));
+    let loader = Arc::new(BuiltinProgram::new_loader(Config::default()));
     for (opc, dst, src, expected_result) in [
         (ebpf::BPF_JEQ, 3, 3, THEN),
         (ebpf::BPF_JEQ, 3, 7, ELSE),
@@ -1652,6 +1755,7 @@ fn test_conditional_jumps() {
         (ebpf::BPF_JLE, 7, 3, ELSE),
         (ebpf::BPF_JSET, 3, 7, THEN),
         (ebpf::BPF_JSET, 2, 4, ELSE),
+        (ebpf::BPF_JSET, -8, 7, ELSE),
         (ebpf::BPF_JNE, 3, 7, THEN),
         (ebpf::BPF_JNE, 3, 3, ELSE),
         (ebpf::BPF_JSGT, -3, -7, THEN),
@@ -1693,6 +1797,66 @@ fn test_conditional_jumps() {
             );
         }
     }
+}
+
+#[test]
+fn test_conditional_jumps_same_register() {
+    // Zero in the lower half only, for `jset32`.
+    for value in [0, 3, -3, 1 << 32] {
+        for condition in [
+            "jeq", "jgt", "jge", "jlt", "jle", "jset", "jne", "jsgt", "jsge", "jslt", "jsle",
+        ] {
+            for (suffix, compared) in [("32", value as u32 as i64), ("", value)] {
+                let taken = match condition {
+                    "jeq" | "jge" | "jle" | "jsge" | "jsle" => true,
+                    "jset" => compared != 0,
+                    _ => false,
+                };
+                test_interpreter_and_jit_asm!(
+                    &format!(
+                        "
+                        lddw r1, {value}
+                        {condition}{suffix} r1, r1, +2
+                        mov64 r0, 0
+                        exit
+                        mov64 r0, 1
+                        exit"
+                    ),
+                    NO_INPUT,
+                    TestContextObject::new(4),
+                    ProgramResult::Ok(taken as u64),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_jset_upper_half() {
+    // The only bit in common is in the upper half.
+    test_interpreter_and_jit_asm!(
+        "
+        lddw r1, 0x100000000
+        mov64 r0, 0
+        jset r1, -1, +1
+        mov64 r0, 1
+        exit",
+        NO_INPUT,
+        TestContextObject::new(4),
+        ProgramResult::Ok(0),
+    );
+    test_interpreter_and_jit_asm!(
+        "
+        lddw r1, 0x100000000
+        mov64 r2, -1
+        mov64 r0, 0
+        jset r1, r2, +1
+        mov64 r0, 1
+        exit",
+        NO_INPUT,
+        TestContextObject::new(5),
+        ProgramResult::Ok(0),
+    );
 }
 
 // Call Stack
@@ -2045,11 +2209,7 @@ fn test_err_mem_access_out_of_bound() {
     prog[8] = ebpf::LD_DW_IMM;
     prog[24] = ebpf::ST_B_IMM;
     prog[32] = ebpf::EXIT;
-    let config = Config {
-        enable_register_tracing: true,
-        ..Config::default()
-    };
-    let loader = Arc::new(BuiltinProgram::new_loader(config));
+    let loader = Arc::new(BuiltinProgram::new_loader(Config::default()));
     for (address, k) in [
         (0x2u64, "allocated"),
         (0x8002u64, "unallocated"),
@@ -2181,6 +2341,54 @@ fn test_callx() {
 }
 
 #[test]
+fn test_callx_unaligned_target() {
+    // The target is truncated to the instruction containing it.
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r0, 0x0
+        mov64 r8, 0x1
+        lsh64 r8, 0x20
+        or64 r8, 0x33
+        callx r8
+        exit
+        function_foo:
+        mov64 r0, 0x2A
+        exit",
+        NO_INPUT,
+        TestContextObject::new(8),
+        ProgramResult::Ok(42),
+    );
+}
+
+#[test]
+fn test_err_callx_oob_computed() {
+    // Just past the end of the program.
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r8, 0x1
+        lsh64 r8, 0x20
+        or64 r8, 0x28
+        callx r8
+        exit",
+        NO_INPUT,
+        TestContextObject::new(4),
+        ProgramResult::Err(EbpfError::CallOutsideTextSegment),
+    );
+    // Just before the start of the program.
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r8, 0x1
+        lsh64 r8, 0x20
+        sub64 r8, 0x1
+        callx r8
+        exit",
+        NO_INPUT,
+        TestContextObject::new(4),
+        ProgramResult::Err(EbpfError::CallOutsideTextSegment),
+    );
+}
+
+#[test]
 fn test_err_callx_oob_low() {
     let config = Config {
         enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
@@ -2301,10 +2509,23 @@ fn test_err_reg_stack_depth() {
             lsh64 r0, 0x20
             callx r0
             exit",
-            config,
+            config.clone(),
             NO_INPUT,
             TestContextObject::new(4 * max_call_depth as u64),
             ProgramResult::Err(EbpfError::CallDepthExceeded),
+        );
+        // One instruction short of detecting the depth being exceeded.
+        test_interpreter_and_jit_asm!(
+            "
+            add64 r10, 0
+            mov64 r0, 0x1
+            lsh64 r0, 0x20
+            callx r0
+            exit",
+            config,
+            NO_INPUT,
+            TestContextObject::new(4 * max_call_depth as u64 - 1),
+            ProgramResult::Err(EbpfError::ExceededMaxInstructions),
         );
     }
 }
@@ -2396,6 +2617,170 @@ fn test_syscall() {
     );
 }
 
+struct SyscallErr;
+
+impl BuiltinFunctionDefinition<TestContextObject> for SyscallErr {
+    type Error = Box<dyn std::error::Error>;
+
+    fn rust(
+        _: &mut TestContextObject,
+        _: u64,
+        _: u64,
+        _: u64,
+        _: u64,
+        _: u64,
+    ) -> Result<u64, Self::Error> {
+        Err(Box::new(EbpfError::DivideByZero))
+    }
+}
+
+/// Expects the arguments `1, 2, 4, 8, 16`, overwrites every register a host function is allowed to
+/// clobber and returns `0x400`.
+struct SyscallClobber;
+
+impl BuiltinFunctionDefinition<TestContextObject> for SyscallClobber {
+    type Error = Box<dyn std::error::Error>;
+
+    fn rust(
+        _: &mut TestContextObject,
+        a: u64,
+        b: u64,
+        c: u64,
+        d: u64,
+        e: u64,
+    ) -> Result<u64, Self::Error> {
+        if (a, b, c, d, e) != (1, 2, 4, 8, 16) {
+            return Err(format!("unexpected arguments {:?}", (a, b, c, d, e)).into());
+        }
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            std::arch::asm!(
+                "mov rax, -1",
+                "mov rcx, -1",
+                "mov rdx, -1",
+                "mov rsi, -1",
+                "mov rdi, -1",
+                "mov r8, -1",
+                "mov r9, -1",
+                "mov r10, -1",
+                "mov r11, -1",
+                "mov r12, -1",
+                "mov r13, -1",
+                "mov r14, -1",
+                "mov r15, -1",
+                out("rax") _,
+                out("rcx") _,
+                out("rdx") _,
+                out("rsi") _,
+                out("rdi") _,
+                out("r8") _,
+                out("r9") _,
+                out("r10") _,
+                out("r11") _,
+                out("r12") _,
+                out("r13") _,
+                out("r14") _,
+                out("r15") _,
+            );
+        }
+        Ok(0x400)
+    }
+}
+
+#[test]
+fn test_err_syscall_error() {
+    test_syscall_asm!(
+        "
+        mov64 r0, 0x7
+        syscall bpf_syscall_err
+        mov64 r0, 0x0
+        exit",
+        NO_INPUT,
+        (
+            "bpf_syscall_err" => SyscallErr,
+        ),
+        TestContextObject::new(2),
+        ProgramResult::Err(EbpfError::SyscallError(Box::new(EbpfError::DivideByZero))),
+    );
+}
+
+#[test]
+fn test_syscall_preserves_registers() {
+    test_syscall_asm!(
+        "
+        mov64 r1, 0x1
+        mov64 r2, 0x2
+        mov64 r3, 0x4
+        mov64 r4, 0x8
+        mov64 r5, 0x10
+        mov64 r6, 0x20
+        mov64 r7, 0x40
+        mov64 r8, 0x80
+        mov64 r9, 0x100
+        mov64 r0, 0x200
+        syscall bpf_syscall_clobber
+        add64 r0, r1
+        add64 r0, r2
+        add64 r0, r3
+        add64 r0, r4
+        add64 r0, r5
+        add64 r0, r6
+        add64 r0, r7
+        add64 r0, r8
+        add64 r0, r9
+        add64 r0, r10
+        exit",
+        NO_INPUT,
+        (
+            "bpf_syscall_clobber" => SyscallClobber,
+        ),
+        TestContextObject::new(22),
+        ProgramResult::Ok(0x5ff + ebpf::MM_STACK_START + 0x1000),
+    );
+}
+
+#[test]
+fn test_syscall_in_internal_call() {
+    test_syscall_asm!(
+        "
+        mov r1, 1
+        call function_foo
+        add64 r0, 1
+        exit
+        function_foo:
+        mov r2, 2
+        mov r3, 3
+        mov r4, 4
+        mov r5, 5
+        syscall bpf_gather_bytes
+        exit",
+        NO_INPUT,
+        (
+            "bpf_gather_bytes" => syscalls::SyscallGatherBytes,
+        ),
+        TestContextObject::new(10),
+        ProgramResult::Ok(0x0102030406),
+    );
+}
+
+#[test]
+fn test_err_syscall_error_capped() {
+    // The meter is checked before the syscall.
+    test_syscall_asm!(
+        "
+        mov64 r0, 0x7
+        mov64 r0, 0x7
+        syscall bpf_syscall_err
+        exit",
+        NO_INPUT,
+        (
+            "bpf_syscall_err" => SyscallErr,
+        ),
+        TestContextObject::new(2),
+        ProgramResult::Err(EbpfError::ExceededMaxInstructions),
+    );
+}
+
 #[test]
 fn test_call_gather_bytes() {
     test_syscall_asm!(
@@ -2463,10 +2848,7 @@ declare_builtin_function!(
             };
         #[allow(unused_mut)]
         if depth > 0 {
-            let mut config = Config {
-                enable_register_tracing: true,
-                ..Config::default()
-            };
+            let mut config = Config::default();
             if version == 0 {
                 config.enabled_sbpf_versions = SBPFVersion::V0..=SBPFVersion::V0;
             } else {
@@ -2484,7 +2866,7 @@ declare_builtin_function!(
                 Arc::new(loader),
             )
             .unwrap();
-            let input =[depth as u8 - 1, throw as u8];
+            let input = [depth as u8 - 1, throw as u8];
             test_interpreter_and_jit!(
                 executable,
                 &raw const input,
@@ -2543,16 +2925,64 @@ fn test_tight_infinite_loop_unconditional() {
 
 #[test]
 fn test_tight_infinite_recursion() {
+    let max_call_depth = Config::default().max_call_depth as u64;
+    for (budget, expected) in [
+        (6, EbpfError::ExceededMaxInstructions),
+        (3 * max_call_depth - 1, EbpfError::ExceededMaxInstructions),
+        (3 * max_call_depth, EbpfError::CallDepthExceeded),
+    ] {
+        test_interpreter_and_jit_asm!(
+            "
+            entrypoint:
+            add64 r10, 0
+            mov64 r3, 0x41414141
+            call entrypoint
+            exit",
+            NO_INPUT,
+            TestContextObject::new(budget),
+            ProgramResult::Err(expected),
+        );
+    }
+}
+
+#[test]
+fn test_entrypoint_not_first() {
     test_interpreter_and_jit_asm!(
         "
+        function_foo:
+        mov64 r0, 3
+        exit
         entrypoint:
-        add64 r10, 0
-        mov64 r3, 0x41414141
-        call entrypoint
+        call function_foo
+        add64 r0, 4
         exit",
         NO_INPUT,
-        TestContextObject::new(6),
-        ProgramResult::Err(EbpfError::ExceededMaxInstructions),
+        TestContextObject::new(5),
+        ProgramResult::Ok(7),
+    );
+}
+
+#[test]
+fn test_nested_calls_return() {
+    // Calls return to the right place and leave the meter and the call depth as they were. There
+    // are more nested calls than the depth allows, were it not for the returns.
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r6, 40
+        loop:
+        call function_foo
+        sub64 r6, 1
+        jne r6, 0, loop
+        mov64 r0, 7
+        exit
+        function_foo:
+        call function_bar
+        exit
+        function_bar:
+        exit",
+        NO_INPUT,
+        TestContextObject::new(243),
+        ProgramResult::Ok(7),
     );
 }
 
@@ -2780,6 +3210,41 @@ fn test_err_call_unresolved() {
         TestContextObject::new(7),
         ProgramResult::Err(EbpfError::UnsupportedInstruction),
     );
+}
+
+#[test]
+fn test_err_call_imm_outside_text() {
+    let loader = Arc::new(BuiltinProgram::new_loader(Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V4,
+        // Not resolving the call takes precedence over the call depth.
+        max_call_depth: 1,
+        ..Config::default()
+    }));
+    for sbpf_version in [SBPFVersion::V3, SBPFVersion::V4] {
+        for imm in [2i32, -3] {
+            let mut prog = [
+                [0xb7, 0x00, 0, 0, 0, 0, 0, 0], // mov64 r0, 0
+                [0x85, 0x10, 0, 0, 0, 0, 0, 0], // call imm
+                [0x95, 0, 0, 0, 0, 0, 0, 0],    // exit
+            ]
+            .concat();
+            LittleEndian::write_i32(&mut prog[12..], imm);
+            #[allow(unused_mut)]
+            let mut executable = Executable::<TestContextObject>::from_text_bytes(
+                &prog,
+                loader.clone(),
+                sbpf_version,
+                FunctionRegistry::default(),
+            )
+            .unwrap();
+            test_interpreter_and_jit!(
+                executable,
+                NO_INPUT,
+                TestContextObject::new(2),
+                ProgramResult::Err(EbpfError::UnsupportedInstruction),
+            );
+        }
+    }
 }
 
 #[test]
@@ -3231,10 +3696,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
     let mem_size = 1024 * 1024;
     let executable = Executable::<TestContextObject>::from_text_bytes(
         prog,
-        Arc::new(BuiltinProgram::new_loader(Config {
-            enable_register_tracing: true,
-            ..Config::default()
-        })),
+        Arc::new(BuiltinProgram::new_loader(Config::default())),
         SBPFVersion::V4,
         FunctionRegistry::default(),
     );
@@ -3285,7 +3747,6 @@ fn execute_generated_program(prog: &[u8]) -> bool {
     let (instruction_count_jit, result_jit) =
         vm.execute_program(&executable, &mut ExecutionMode::Jit, &mut []);
     let trace_jit = &vm.register_trace;
-    debug_assert!(!trace_interpreter.is_empty());
     if format!("{result_interpreter:?}") != format!("{result_jit:?}")
         || !compare_register_trace(&trace_interpreter, trace_jit)
     {
@@ -3477,6 +3938,42 @@ fn test_mov32_reg_truncating() {
 }
 
 #[test]
+fn test_err_call_imm_unknown_src() {
+    // The verifier accepts any source register up to 10. The meter is checked before the error.
+    let mut prog = [0; 32];
+    prog[0] = ebpf::MOV64_IMM;
+    prog[8] = ebpf::MOV64_IMM;
+    prog[16] = ebpf::CALL_IMM;
+    prog[17] = 5 << 4;
+    LittleEndian::write_u32(&mut prog[20..], 100);
+    prog[24] = ebpf::EXIT;
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+        ..Config::default()
+    };
+    let loader = Arc::new(BuiltinProgram::new_loader(config));
+    for (budget, expected) in [
+        (2, EbpfError::ExceededMaxInstructions),
+        (3, EbpfError::UnsupportedInstruction),
+    ] {
+        #[allow(unused_mut)]
+        let mut executable = Executable::<TestContextObject>::from_text_bytes(
+            &prog,
+            loader.clone(),
+            SBPFVersion::V3,
+            FunctionRegistry::default(),
+        )
+        .unwrap();
+        test_interpreter_and_jit!(
+            executable,
+            NO_INPUT,
+            TestContextObject::new(budget),
+            ProgramResult::Err(expected),
+        );
+    }
+}
+
+#[test]
 fn test_lddw() {
     let config = Config {
         enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
@@ -3510,6 +4007,17 @@ fn test_lddw() {
         NO_INPUT,
         TestContextObject::new(3),
         ProgramResult::Ok(0x80000000),
+    );
+    // Neither half is sign extended.
+    test_interpreter_and_jit_asm!(
+        "
+        add64 r10, 0
+        lddw r0, 0x80000000ffffffff
+        exit",
+        config.clone(),
+        NO_INPUT,
+        TestContextObject::new(3),
+        ProgramResult::Ok(0x80000000ffffffff),
     );
     test_interpreter_and_jit_asm!(
         "
@@ -3603,6 +4111,38 @@ fn test_lddw() {
         NO_INPUT,
         TestContextObject::new(3),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
+    );
+}
+
+#[test]
+fn test_lddw_call_target() {
+    test_interpreter_and_jit_asm!(
+        "
+        call function_foo
+        exit
+        function_foo:
+        lddw r0, 0x100000002
+        exit",
+        NO_INPUT,
+        TestContextObject::new(4),
+        ProgramResult::Ok(0x100000002),
+    );
+}
+
+#[test]
+fn test_err_callx_into_lddw() {
+    // The second half of `lddw` is at pc 5.
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r8, 0x1
+        lsh64 r8, 0x20
+        or64 r8, 0x28
+        callx r8
+        lddw r0, 0x1
+        exit",
+        NO_INPUT,
+        TestContextObject::new(5),
+        ProgramResult::Err(EbpfError::UnsupportedInstruction),
     );
 }
 
@@ -3926,6 +4466,90 @@ fn test_mod() {
 }
 
 #[test]
+fn test_div_mod_full_width() {
+    // Both operands need all 64 bits: the divisor's low 32 bits are zero.
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r0, 1
+        lsh64 r0, 40
+        mov64 r1, 1
+        lsh64 r1, 33
+        div64 r0, r1
+        exit",
+        NO_INPUT,
+        TestContextObject::new(6),
+        ProgramResult::Ok(128),
+    );
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r0, 1
+        lsh64 r0, 40
+        add64 r0, 5
+        mov64 r1, 1
+        lsh64 r1, 33
+        mod64 r0, r1
+        exit",
+        NO_INPUT,
+        TestContextObject::new(7),
+        ProgramResult::Ok(5),
+    );
+}
+
+#[test]
+fn test_div_imm_extension() {
+    // The immediate is sign extended for 64-bit and truncated for 32-bit division.
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r0, -1
+        div64 r0, -1
+        mov64 r1, -1
+        div32 r1, -1
+        add64 r0, r1
+        exit",
+        NO_INPUT,
+        TestContextObject::new(6),
+        ProgramResult::Ok(2),
+    );
+    // Remainders, and a destination other than the registers `div` uses.
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r0, -1
+        mod64 r0, -2
+        mov64 r1, -1
+        mod32 r1, -2
+        mov64 r2, 7
+        div64 r2, 2
+        add64 r0, r1
+        add64 r0, r2
+        exit",
+        NO_INPUT,
+        TestContextObject::new(9),
+        ProgramResult::Ok(5),
+    );
+}
+
+#[test]
+fn test_err_div_mod_by_zero_reg() {
+    // Only the low 32 bits of the divisor are zero.
+    for op in ["div32", "mod32"] {
+        test_interpreter_and_jit_asm!(
+            &format!(
+                "
+                mov64 r0, 5
+                mov64 r1, 1
+                lsh64 r1, 32
+                {} r0, r1
+                exit",
+                op
+            ),
+            NO_INPUT,
+            TestContextObject::new(4),
+            ProgramResult::Err(EbpfError::DivideByZero),
+        );
+    }
+}
+
+#[test]
 fn test_symbol_relocation() {
     // No relocation is necessary in SBFPv3
     let input = [72, 101, 108, 108, 111];
@@ -3972,6 +4596,41 @@ fn test_stack_gaps() {
             1
         )),
     );
+
+    // The frame of the callee is a frame and a gap past the frame of the caller, so the stack of
+    // the caller is not where it would be without the gaps.
+    for (enable_stack_frame_gaps, budget, expected) in [
+        (
+            true,
+            3,
+            ProgramResult::Err(EbpfError::StackAccessViolation(
+                AccessType::Load,
+                0x200001ff8,
+                8,
+                1,
+            )),
+        ),
+        (false, 5, ProgramResult::Ok(77)),
+    ] {
+        let config = Config {
+            enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+            enable_stack_frame_gaps,
+            ..Config::default()
+        };
+        test_interpreter_and_jit_asm!(
+            "
+            stw [r10 - 8], 77
+            call function_foo
+            exit
+            function_foo:
+            ldxdw r0, [r10 - 4104]
+            exit",
+            config,
+            NO_INPUT,
+            TestContextObject::new(budget),
+            expected,
+        );
+    }
 
     // V3 and V4 do not have stack gaps, so we should see 77 as the return.
     let config = Config {
@@ -4022,5 +4681,165 @@ fn test_direct_stores() {
             TestContextObject::new(12),
             ProgramResult::Ok(0x8877665643efcda8),
         );
+    }
+}
+
+#[test]
+fn test_lddw_exceeding_budget() {
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
+    // `lddw` counts as one instruction over two slots, which the meter must not count until the
+    // instruction is within the budget: the pc of `ExceededMaxInstructions` is that of the first
+    // instruction past it.
+    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
+        let config = Config {
+            enabled_sbpf_versions: sbpf_version..=sbpf_version,
+            ..Config::default()
+        };
+        for source in [
+            r#"
+            lddw r0, 1
+            exit
+            "#,
+            r#"
+            mov r0, 0
+            mov r1, 0
+            lddw r2, 1
+            exit
+            "#,
+            r#"
+            mov r0, 0
+            lddw r1, 1
+            lddw r2, 2
+            exit
+            "#,
+        ] {
+            let executable = assemble::<TestContextObject>(
+                source,
+                Arc::new(BuiltinProgram::new_loader(config.clone())),
+            )
+            .unwrap();
+            executable.verify::<RequisiteVerifier>().unwrap();
+            executable.jit_compile().unwrap();
+            for budget in 0..5 {
+                let mut results = Vec::new();
+                for (name, mode) in [
+                    ("interpreter", ExecutionMode::Interpreted),
+                    ("jit", ExecutionMode::Jit),
+                ] {
+                    let mut context_object = TestContextObject::new(budget);
+                    create_vm!(
+                        vm,
+                        &executable,
+                        &mut context_object,
+                        stack,
+                        heap,
+                        vec![],
+                        None
+                    );
+                    let mut mode = mode;
+                    let mut call_frames =
+                        vec![CallFrame::default(); Config::default().max_call_depth];
+                    let (count, result) =
+                        vm.execute_program(&executable, &mut mode, &mut call_frames);
+                    results.push((count, format!("{result:?}"), vm.registers[11]));
+                    assert_eq!(
+                        results[0],
+                        results[results.len() - 1],
+                        "{name}, {sbpf_version:?}, budget {budget}:{source}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_entrypoint_in_lddw() {
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
+    // Nothing stops an entrypoint from pointing at the second half of an `lddw`, which the JITs
+    // treat as an invalid jump target. Execution has to fail there as in the interpreter.
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V4,
+        ..Config::default()
+    };
+    let program = [
+        [0x18, 0x00, 0, 0, 1, 0, 0, 0], // lddw r0, 1
+        [0x00, 0x00, 0, 0, 0, 0, 0, 0],
+        [0x95, 0, 0, 0, 0, 0, 0, 0], // exit
+    ]
+    .concat();
+    let mut function_registry = FunctionRegistry::default();
+    function_registry
+        .register_function(ebpf::hash_symbol_name(b"entrypoint"), *b"entrypoint", 1)
+        .unwrap();
+    let executable = Executable::<TestContextObject>::from_text_bytes(
+        &program,
+        Arc::new(BuiltinProgram::new_loader(config)),
+        SBPFVersion::V0,
+        function_registry,
+    )
+    .unwrap();
+    assert_eq!(executable.get_entrypoint_instruction_offset(), 1);
+    executable.verify::<RequisiteVerifier>().unwrap();
+    executable.jit_compile().unwrap();
+    let mut results = Vec::new();
+    for (name, mode) in [
+        ("interpreter", ExecutionMode::Interpreted),
+        ("jit", ExecutionMode::Jit),
+    ] {
+        let mut context_object = TestContextObject::new(10);
+        create_vm!(
+            vm,
+            &executable,
+            &mut context_object,
+            stack,
+            heap,
+            vec![],
+            None
+        );
+        let mut mode = mode;
+        let mut call_frames = vec![CallFrame::default(); Config::default().max_call_depth];
+        let (count, result) = vm.execute_program(&executable, &mut mode, &mut call_frames);
+        results.push((count, format!("{result:?}"), vm.registers[11]));
+        assert_eq!(results[0], results[results.len() - 1], "{name}");
+    }
+}
+
+#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[test]
+fn test_max_call_depth_zero() {
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
+    // FIXME: The interpreter panics.
+    let config = Config {
+        max_call_depth: 0,
+        ..Config::default()
+    };
+    let executable = assemble::<TestContextObject>(
+        "
+        call function_foo
+        exit
+        function_foo:
+        exit",
+        Arc::new(BuiltinProgram::new_loader(config)),
+    )
+    .unwrap();
+    executable.jit_compile().unwrap();
+    {
+        let mut context_object = TestContextObject::new(10);
+        create_vm!(
+            vm,
+            &executable,
+            &mut context_object,
+            stack,
+            heap,
+            vec![],
+            None
+        );
+        let mut call_frames = vec![CallFrame::default(); 1];
+        let (_, result) =
+            vm.execute_program(&executable, &mut ExecutionMode::Jit, &mut call_frames);
+        let expected = ProgramResult::Err(EbpfError::CallDepthExceeded);
+        assert_eq!(format!("{result:?}"), format!("{expected:?}"));
+        assert_eq!(vm.registers[11], 0);
     }
 }

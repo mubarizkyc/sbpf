@@ -30,21 +30,19 @@ use shuttle::sync::Arc;
 #[cfg(not(feature = "shuttle-test"))]
 use std::sync::Arc;
 
-#[cfg(all(feature = "jit", not(feature = "shuttle-test")))]
-use rand::{thread_rng, Rng};
-#[cfg(all(feature = "jit", feature = "shuttle-test"))]
-use shuttle::rand::{thread_rng, Rng};
-
 /// Returns (and if not done before generates) the encryption key for the VM pointer
-#[cfg(feature = "jit")]
 pub fn get_runtime_environment_key() -> i32 {
-    static RUNTIME_ENVIRONMENT_KEY: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
-    *RUNTIME_ENVIRONMENT_KEY.get_or_init(|| thread_rng().gen::<i32>() >> 1)
-}
-
-#[cfg(not(feature = "jit"))]
-pub fn get_runtime_environment_key() -> i32 {
-    0
+    cfg_select! {
+        feature = "jit" => {
+            cfg_select! {
+                feature = "shuttle-test" => { use shuttle::rand::{thread_rng, Rng}; }
+                _ => { use rand::{thread_rng, Rng}; }
+            }
+            static RUNTIME_ENVIRONMENT_KEY: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+            *RUNTIME_ENVIRONMENT_KEY.get_or_init(|| thread_rng().gen::<i32>() >> 1)
+        }
+        _ => 0
+    }
 }
 
 /// Default VM configuration settings.
@@ -124,8 +122,6 @@ pub struct Config {
     pub instruction_meter_checkpoint_distance: usize,
     /// Enable instruction meter and limiting
     pub enable_instruction_meter: bool,
-    /// Enable instruction tracing
-    pub enable_register_tracing: bool,
     /// Enable dynamic string allocation for labels
     pub enable_symbol_and_section_labels: bool,
     /// Reject ELF files containing issues that the verifier did not catch before (up to v0.2.21)
@@ -160,7 +156,6 @@ impl Default for Config {
             enable_stack_frame_gaps: true,
             instruction_meter_checkpoint_distance: 10000,
             enable_instruction_meter: true,
-            enable_register_tracing: false,
             enable_symbol_and_section_labels: false,
             reject_broken_elfs: false,
             #[cfg(feature = "jit")]
@@ -1037,7 +1032,7 @@ impl<C: ContextObject> EncryptedHostAddressToEbpfVm<C> {
 #[inline(never)]
 fn run_interpreter<C: ContextObject>(mut interpreter: Interpreter<C>) {
     #[cfg(feature = "debugger")]
-    if let Some(debug_port) = interpreter.vm.debug_port.clone() {
+    if let Some(debug_port) = interpreter.vm.debug_port {
         return crate::debugger::execute(&mut interpreter, debug_port);
     }
 
