@@ -480,7 +480,7 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
         //                     ^category      ^mnemonic    ^is_imm
         match opc {
             // ── LOAD ────────────────────────────────────────────────────────
-            ebpf::LD_DW_IMM => Some(("load", "lddw", true)),
+            ebpf::LD_DW_IMM => Some(("alu", "lddw", true)),
 
             // Legacy (v1)
             ebpf::LD_B_REG if !version.move_memory_instruction_classes() => {
@@ -1496,11 +1496,15 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
                        };
 
                 if wanted {
-                    let (branch_taken, branch_target) = if category == "jump" && opcode_name != "ja" {
-                        let taken = next_pc != _insn_old_next_pc;
-                        (Some(taken), if taken { Some(next_pc) } else { None })
+                    let (branch_taken, branch_target) = if category == "jump" {
+                        if opcode_name == "ja" {
+                            (None, Some(next_pc))  // no verdict, but YES target
+                        } else {
+                            let taken = next_pc != _insn_old_next_pc;
+                            (Some(taken), if taken { Some(next_pc) } else { None })
+                        }
                     } else {
-                        (None, None)  // ja: no verdict, no target needed in the trace
+                        (None, None)
                     };
                     let entry = crate::vm::InsnTraceEntry {
                         pc: self.reg[11],
