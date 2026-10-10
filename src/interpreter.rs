@@ -243,6 +243,7 @@ pub struct Interpreter<'a, 'b, 'c, C: ContextObject> {
     pub(crate) debug_state: DebugState,
     #[cfg(feature = "debugger")]
     pub(crate) breakpoints: Vec<u64>,
+    //added
     pub(crate) trace_ring: Vec<TraceEntry>,
     pub(crate) trace_pos: usize,
     pub(crate) trace_enabled: bool,
@@ -416,130 +417,21 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
     /// Translate between the virtual machines' pc value and the pc value used by the debugger
     #[cfg(feature = "debugger")]
     pub fn get_dbg_pc(&self) -> u64 {
-        (self.reg[11] * ebpf::INSN_SIZE as u64) + self.executable.get_text_section_offset()
+        // V3+ ELFs place .text at its real vaddr (e.g. 0x1_0000_0000) in the on-disk
+        // sh_addr/p_vaddr, which is also what LLDB uses when it loads the .so.debug.
+        // Pre-V3 ELFs have .text at sh_addr=0 in the file (the runtime adds MM_REGION_SIZE
+        // itself), so reporting a file-offset-style PC happens to line up with LLDB's view.
+        let base = if self
+            .executable
+            .get_sbpf_version()
+            .enable_lower_rodata_vaddr()
+        {
+            self.executable.get_text_section_vaddr()
+        } else {
+            self.executable.get_text_section_offset()
+        };
+        base + self.reg[11] * ebpf::INSN_SIZE as u64
     }
-
-    fn classify_opcode(opc: u8) -> Option<(&'static str, &'static str)> {
-        use crate::ebpf;
-        match opc {
-            // ALU 32
-            ebpf::ADD32_IMM => Some(("alu", "ADD32_IMM")),
-            ebpf::ADD32_REG => Some(("alu", "ADD32_REG")),
-            ebpf::SUB32_IMM => Some(("alu", "SUB32_IMM")),
-            ebpf::SUB32_REG => Some(("alu", "SUB32_REG")),
-            ebpf::MUL32_IMM => Some(("alu", "MUL32_IMM")),
-            ebpf::MUL32_REG => Some(("alu", "MUL32_REG")),
-            ebpf::DIV32_IMM => Some(("alu", "DIV32_IMM")),
-            ebpf::DIV32_REG => Some(("alu", "DIV32_REG")),
-            ebpf::OR32_IMM => Some(("alu", "OR32_IMM")),
-            ebpf::OR32_REG => Some(("alu", "OR32_REG")),
-            ebpf::AND32_IMM => Some(("alu", "AND32_IMM")),
-            ebpf::AND32_REG => Some(("alu", "AND32_REG")),
-            ebpf::LSH32_IMM => Some(("alu", "LSH32_IMM")),
-            ebpf::LSH32_REG => Some(("alu", "LSH32_REG")),
-            ebpf::RSH32_IMM => Some(("alu", "RSH32_IMM")),
-            ebpf::RSH32_REG => Some(("alu", "RSH32_REG")),
-            ebpf::NEG32 => Some(("alu", "NEG32")),
-            ebpf::MOD32_IMM => Some(("alu", "MOD32_IMM")),
-            ebpf::MOD32_REG => Some(("alu", "MOD32_REG")),
-            ebpf::XOR32_IMM => Some(("alu", "XOR32_IMM")),
-            ebpf::XOR32_REG => Some(("alu", "XOR32_REG")),
-            ebpf::MOV32_IMM => Some(("alu", "MOV32_IMM")),
-            ebpf::MOV32_REG => Some(("alu", "MOV32_REG")),
-            ebpf::ARSH32_IMM => Some(("alu", "ARSH32_IMM")),
-            ebpf::ARSH32_REG => Some(("alu", "ARSH32_REG")),
-            // ALU 64
-            ebpf::ADD64_IMM => Some(("alu", "ADD64_IMM")),
-            ebpf::ADD64_REG => Some(("alu", "ADD64_REG")),
-            ebpf::SUB64_IMM => Some(("alu", "SUB64_IMM")),
-            ebpf::SUB64_REG => Some(("alu", "SUB64_REG")),
-            ebpf::MUL64_IMM => Some(("alu", "MUL64_IMM")),
-            ebpf::MUL64_REG => Some(("alu", "MUL64_REG")),
-            ebpf::DIV64_IMM => Some(("alu", "DIV64_IMM")),
-            ebpf::DIV64_REG => Some(("alu", "DIV64_REG")),
-            ebpf::OR64_IMM => Some(("alu", "OR64_IMM")),
-            ebpf::OR64_REG => Some(("alu", "OR64_REG")),
-            ebpf::AND64_IMM => Some(("alu", "AND64_IMM")),
-            ebpf::AND64_REG => Some(("alu", "AND64_REG")),
-            ebpf::LSH64_IMM => Some(("alu", "LSH64_IMM")),
-            ebpf::LSH64_REG => Some(("alu", "LSH64_REG")),
-            ebpf::RSH64_IMM => Some(("alu", "RSH64_IMM")),
-            ebpf::RSH64_REG => Some(("alu", "RSH64_REG")),
-            ebpf::NEG64 => Some(("alu", "NEG64")),
-            ebpf::MOD64_IMM => Some(("alu", "MOD64_IMM")),
-            ebpf::MOD64_REG => Some(("alu", "MOD64_REG")),
-            ebpf::XOR64_IMM => Some(("alu", "XOR64_IMM")),
-            ebpf::XOR64_REG => Some(("alu", "XOR64_REG")),
-            ebpf::MOV64_IMM => Some(("alu", "MOV64_IMM")),
-            ebpf::MOV64_REG => Some(("alu", "MOV64_REG")),
-            ebpf::ARSH64_IMM => Some(("alu", "ARSH64_IMM")),
-            ebpf::ARSH64_REG => Some(("alu", "ARSH64_REG")),
-            ebpf::LE => Some(("alu", "LE")),
-            ebpf::BE => Some(("alu", "BE")),
-            // JMP32 (new in sbpf-main)
-            ebpf::JEQ32_IMM => Some(("jump", "JEQ32_IMM")),
-            ebpf::JEQ32_REG => Some(("jump", "JEQ32_REG")),
-            ebpf::JGT32_IMM => Some(("jump", "JGT32_IMM")),
-            ebpf::JGT32_REG => Some(("jump", "JGT32_REG")),
-            ebpf::JGE32_IMM => Some(("jump", "JGE32_IMM")),
-            ebpf::JGE32_REG => Some(("jump", "JGE32_REG")),
-            ebpf::JLT32_IMM => Some(("jump", "JLT32_IMM")),
-            ebpf::JLT32_REG => Some(("jump", "JLT32_REG")),
-            ebpf::JLE32_IMM => Some(("jump", "JLE32_IMM")),
-            ebpf::JLE32_REG => Some(("jump", "JLE32_REG")),
-            ebpf::JSET32_IMM => Some(("jump", "JSET32_IMM")),
-            ebpf::JSET32_REG => Some(("jump", "JSET32_REG")),
-            ebpf::JNE32_IMM => Some(("jump", "JNE32_IMM")),
-            ebpf::JNE32_REG => Some(("jump", "JNE32_REG")),
-            ebpf::JSGT32_IMM => Some(("jump", "JSGT32_IMM")),
-            ebpf::JSGT32_REG => Some(("jump", "JSGT32_REG")),
-            ebpf::JSGE32_IMM => Some(("jump", "JSGE32_IMM")),
-            ebpf::JSGE32_REG => Some(("jump", "JSGE32_REG")),
-            ebpf::JSLT32_IMM => Some(("jump", "JSLT32_IMM")),
-            ebpf::JSLT32_REG => Some(("jump", "JSLT32_REG")),
-            ebpf::JSLE32_IMM => Some(("jump", "JSLE32_IMM")),
-            ebpf::JSLE32_REG => Some(("jump", "JSLE32_REG")),
-            // JMP64 (renamed from JMP)
-            ebpf::JA => Some(("jump", "JA")),
-            ebpf::JEQ64_IMM => Some(("jump", "JEQ64_IMM")),
-            ebpf::JEQ64_REG => Some(("jump", "JEQ64_REG")),
-            ebpf::JGT64_IMM => Some(("jump", "JGT64_IMM")),
-            ebpf::JGT64_REG => Some(("jump", "JGT64_REG")),
-            ebpf::JGE64_IMM => Some(("jump", "JGE64_IMM")),
-            ebpf::JGE64_REG => Some(("jump", "JGE64_REG")),
-            ebpf::JLT64_IMM => Some(("jump", "JLT64_IMM")),
-            ebpf::JLT64_REG => Some(("jump", "JLT64_REG")),
-            ebpf::JLE64_IMM => Some(("jump", "JLE64_IMM")),
-            ebpf::JLE64_REG => Some(("jump", "JLE64_REG")),
-            ebpf::JSET64_IMM => Some(("jump", "JSET64_IMM")),
-            ebpf::JSET64_REG => Some(("jump", "JSET64_REG")),
-            ebpf::JNE64_IMM => Some(("jump", "JNE64_IMM")),
-            ebpf::JNE64_REG => Some(("jump", "JNE64_REG")),
-            ebpf::JSGT64_IMM => Some(("jump", "JSGT64_IMM")),
-            ebpf::JSGT64_REG => Some(("jump", "JSGT64_REG")),
-            ebpf::JSGE64_IMM => Some(("jump", "JSGE64_IMM")),
-            ebpf::JSGE64_REG => Some(("jump", "JSGE64_REG")),
-            ebpf::JSLT64_IMM => Some(("jump", "JSLT64_IMM")),
-            ebpf::JSLT64_REG => Some(("jump", "JSLT64_REG")),
-            ebpf::JSLE64_IMM => Some(("jump", "JSLE64_IMM")),
-            ebpf::JSLE64_REG => Some(("jump", "JSLE64_REG")),
-            // calls
-            ebpf::CALL_IMM => Some(("call", "CALL_IMM")),
-            ebpf::CALL_REG => Some(("call", "CALL_REG")),
-            ebpf::EXIT => Some(("call", "EXIT")), // replaces RETURN+SYSCALL
-            _ => None,
-        }
-    }
-
-    fn resolve_account_addr(&self, vm_addr: u64) -> (Option<usize>, Option<u64>) {
-        for r in &self.vm.trace_config.account_ranges {
-            if vm_addr >= r.vm_start && vm_addr < r.vm_end {
-                return (Some(r.account_idx), Some(vm_addr - r.vm_start));
-            }
-        }
-        (None, None)
-    }
-
     fn push_frame(&mut self, config: &Config) -> bool {
         let frame = &mut self.call_frames[self.vm.call_depth as usize];
         frame.caller_saved_registers.copy_from_slice(
@@ -580,6 +472,253 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
         } else {
             value as i64 as u64
         }
+    }
+    pub fn classify_opcode(
+        opc: u8,
+        version: crate::program::SBPFVersion,
+    ) -> Option<(&'static str, &'static str, bool)> {
+        //                     ^category      ^mnemonic    ^is_imm
+        match opc {
+            // ── LOAD ────────────────────────────────────────────────────────
+            ebpf::LD_DW_IMM => Some(("load", "lddw", true)),
+
+            // Legacy (v1)
+            ebpf::LD_B_REG if !version.move_memory_instruction_classes() => {
+                Some(("load", "ldxb", false))
+            }
+            ebpf::LD_H_REG if !version.move_memory_instruction_classes() => {
+                Some(("load", "ldxh", false))
+            }
+            ebpf::LD_W_REG if !version.move_memory_instruction_classes() => {
+                Some(("load", "ldxw", false))
+            }
+            ebpf::LD_DW_REG if !version.move_memory_instruction_classes() => {
+                Some(("load", "ldxdw", false))
+            }
+
+            // v2+
+            ebpf::LD_1B_REG if version.move_memory_instruction_classes() => {
+                Some(("load", "ldxb", false))
+            }
+            ebpf::LD_2B_REG if version.move_memory_instruction_classes() => {
+                Some(("load", "ldxh", false))
+            }
+            ebpf::LD_4B_REG if version.move_memory_instruction_classes() => {
+                Some(("load", "ldxw", false))
+            }
+            ebpf::LD_8B_REG if version.move_memory_instruction_classes() => {
+                Some(("load", "ldxdw", false))
+            }
+
+            // ── STORE ───────────────────────────────────────────────────────
+            // Legacy (v1) - imm stores
+            ebpf::ST_B_IMM if !version.move_memory_instruction_classes() => {
+                Some(("store", "stb", true))
+            }
+            ebpf::ST_H_IMM if !version.move_memory_instruction_classes() => {
+                Some(("store", "sth", true))
+            }
+            ebpf::ST_W_IMM if !version.move_memory_instruction_classes() => {
+                Some(("store", "stw", true))
+            }
+            ebpf::ST_DW_IMM if !version.move_memory_instruction_classes() => {
+                Some(("store", "stdw", true))
+            }
+            // Legacy (v1) - reg stores
+            ebpf::ST_B_REG if !version.move_memory_instruction_classes() => {
+                Some(("store", "stxb", false))
+            }
+            ebpf::ST_H_REG if !version.move_memory_instruction_classes() => {
+                Some(("store", "stxh", false))
+            }
+            ebpf::ST_W_REG if !version.move_memory_instruction_classes() => {
+                Some(("store", "stxw", false))
+            }
+            ebpf::ST_DW_REG if !version.move_memory_instruction_classes() => {
+                Some(("store", "stxdw", false))
+            }
+
+            // v2+ - imm stores
+            ebpf::ST_1B_IMM if version.move_memory_instruction_classes() => {
+                Some(("store", "stb", true))
+            }
+            ebpf::ST_2B_IMM if version.move_memory_instruction_classes() => {
+                Some(("store", "sth", true))
+            }
+            ebpf::ST_4B_IMM if version.move_memory_instruction_classes() => {
+                Some(("store", "stw", true))
+            }
+            ebpf::ST_8B_IMM if version.move_memory_instruction_classes() => {
+                Some(("store", "stdw", true))
+            }
+            // v2+ - reg stores
+            ebpf::ST_1B_REG if version.move_memory_instruction_classes() => {
+                Some(("store", "stxb", false))
+            }
+            ebpf::ST_2B_REG if version.move_memory_instruction_classes() => {
+                Some(("store", "stxh", false))
+            }
+            ebpf::ST_4B_REG if version.move_memory_instruction_classes() => {
+                Some(("store", "stxw", false))
+            }
+            ebpf::ST_8B_REG if version.move_memory_instruction_classes() => {
+                Some(("store", "stxdw", false))
+            }
+
+            // ── ALU 32-bit ──────────────────────────────────────────────────
+            ebpf::ADD32_IMM => Some(("alu", "add32", true)),
+            ebpf::ADD32_REG => Some(("alu", "add32", false)),
+            ebpf::SUB32_IMM => Some(("alu", "sub32", true)),
+            ebpf::SUB32_REG => Some(("alu", "sub32", false)),
+            ebpf::OR32_IMM => Some(("alu", "or32", true)),
+            ebpf::OR32_REG => Some(("alu", "or32", false)),
+            ebpf::AND32_IMM => Some(("alu", "and32", true)),
+            ebpf::AND32_REG => Some(("alu", "and32", false)),
+            ebpf::LSH32_IMM => Some(("alu", "lsh32", true)),
+            ebpf::LSH32_REG => Some(("alu", "lsh32", false)),
+            ebpf::RSH32_IMM => Some(("alu", "rsh32", true)),
+            ebpf::RSH32_REG => Some(("alu", "rsh32", false)),
+            ebpf::XOR32_IMM => Some(("alu", "xor32", true)),
+            ebpf::XOR32_REG => Some(("alu", "xor32", false)),
+            ebpf::MOV32_IMM => Some(("alu", "mov32", true)),
+            ebpf::MOV32_REG => Some(("alu", "mov32", false)),
+            ebpf::ARSH32_IMM => Some(("alu", "arsh32", true)),
+            ebpf::ARSH32_REG => Some(("alu", "arsh32", false)),
+            ebpf::BE => Some(("alu", "be", true)), // imm encodes width
+            ebpf::LE => Some(("alu", "le", true)),
+
+            // Legacy ALU (v1)
+            ebpf::MUL32_IMM if !version.enable_pqr() => Some(("alu", "mul32", true)),
+            ebpf::MUL32_REG if !version.enable_pqr() => Some(("alu", "mul32", false)),
+            ebpf::DIV32_IMM if !version.enable_pqr() => Some(("alu", "div32", true)),
+            ebpf::DIV32_REG if !version.enable_pqr() => Some(("alu", "div32", false)),
+            ebpf::MOD32_IMM if !version.enable_pqr() => Some(("alu", "mod32", true)),
+            ebpf::MOD32_REG if !version.enable_pqr() => Some(("alu", "mod32", false)),
+            ebpf::NEG32 if !version.disable_neg() => Some(("alu", "neg32", true)), // no src operand
+            ebpf::NEG64 if !version.disable_neg() => Some(("alu", "neg64", true)),
+
+            // ── ALU 64-bit ──────────────────────────────────────────────────
+            ebpf::ADD64_IMM => Some(("alu", "add64", true)),
+            ebpf::ADD64_REG => Some(("alu", "add64", false)),
+            ebpf::SUB64_IMM => Some(("alu", "sub64", true)),
+            ebpf::SUB64_REG => Some(("alu", "sub64", false)),
+            ebpf::OR64_IMM => Some(("alu", "or64", true)),
+            ebpf::OR64_REG => Some(("alu", "or64", false)),
+            ebpf::AND64_IMM => Some(("alu", "and64", true)),
+            ebpf::AND64_REG => Some(("alu", "and64", false)),
+            ebpf::LSH64_IMM => Some(("alu", "lsh64", true)),
+            ebpf::LSH64_REG => Some(("alu", "lsh64", false)),
+            ebpf::RSH64_IMM => Some(("alu", "rsh64", true)),
+            ebpf::RSH64_REG => Some(("alu", "rsh64", false)),
+            ebpf::XOR64_IMM => Some(("alu", "xor64", true)),
+            ebpf::XOR64_REG => Some(("alu", "xor64", false)),
+            ebpf::MOV64_IMM => Some(("alu", "mov64", true)),
+            ebpf::MOV64_REG => Some(("alu", "mov64", false)),
+            ebpf::ARSH64_IMM => Some(("alu", "arsh64", true)),
+            ebpf::ARSH64_REG => Some(("alu", "arsh64", false)),
+            ebpf::HOR64_IMM => Some(("alu", "hor64", true)),
+
+            // Legacy 64-bit (v1)
+            ebpf::MUL64_IMM if !version.enable_pqr() => Some(("alu", "mul64", true)),
+            ebpf::MUL64_REG if !version.enable_pqr() => Some(("alu", "mul64", false)),
+            ebpf::DIV64_IMM if !version.enable_pqr() => Some(("alu", "div64", true)),
+            ebpf::DIV64_REG if !version.enable_pqr() => Some(("alu", "div64", false)),
+            ebpf::MOD64_IMM if !version.enable_pqr() => Some(("alu", "mod64", true)),
+            ebpf::MOD64_REG if !version.enable_pqr() => Some(("alu", "mod64", false)),
+
+            // PQR (v2+)
+            ebpf::LMUL32_IMM if version.enable_pqr() => Some(("alu", "lmul32", true)),
+            ebpf::LMUL32_REG if version.enable_pqr() => Some(("alu", "lmul32", false)),
+            ebpf::LMUL64_IMM if version.enable_pqr() => Some(("alu", "lmul64", true)),
+            ebpf::LMUL64_REG if version.enable_pqr() => Some(("alu", "lmul64", false)),
+            ebpf::UHMUL64_IMM if version.enable_pqr() => Some(("alu", "uhmul64", true)),
+            ebpf::UHMUL64_REG if version.enable_pqr() => Some(("alu", "uhmul64", false)),
+            ebpf::SHMUL64_IMM if version.enable_pqr() => Some(("alu", "shmul64", true)),
+            ebpf::SHMUL64_REG if version.enable_pqr() => Some(("alu", "shmul64", false)),
+            ebpf::UDIV32_IMM if version.enable_pqr() => Some(("alu", "udiv32", true)),
+            ebpf::UDIV32_REG if version.enable_pqr() => Some(("alu", "udiv32", false)),
+            ebpf::UDIV64_IMM if version.enable_pqr() => Some(("alu", "udiv64", true)),
+            ebpf::UDIV64_REG if version.enable_pqr() => Some(("alu", "udiv64", false)),
+            ebpf::UREM32_IMM if version.enable_pqr() => Some(("alu", "urem32", true)),
+            ebpf::UREM32_REG if version.enable_pqr() => Some(("alu", "urem32", false)),
+            ebpf::UREM64_IMM if version.enable_pqr() => Some(("alu", "urem64", true)),
+            ebpf::UREM64_REG if version.enable_pqr() => Some(("alu", "urem64", false)),
+            ebpf::SDIV32_IMM if version.enable_pqr() => Some(("alu", "sdiv32", true)),
+            ebpf::SDIV32_REG if version.enable_pqr() => Some(("alu", "sdiv32", false)),
+            ebpf::SDIV64_IMM if version.enable_pqr() => Some(("alu", "sdiv64", true)),
+            ebpf::SDIV64_REG if version.enable_pqr() => Some(("alu", "sdiv64", false)),
+            ebpf::SREM32_IMM if version.enable_pqr() => Some(("alu", "srem32", true)),
+            ebpf::SREM32_REG if version.enable_pqr() => Some(("alu", "srem32", false)),
+            ebpf::SREM64_IMM if version.enable_pqr() => Some(("alu", "srem64", true)),
+            ebpf::SREM64_REG if version.enable_pqr() => Some(("alu", "srem64", false)),
+
+            // ── JUMP ────────────────────────────────────────────────────────
+            ebpf::JA => Some(("jump", "ja", false)), // unconditional, no operands
+
+            // JMP32 (v1)
+            ebpf::JEQ32_IMM if version.enable_jmp32() => Some(("jump", "jeq32", true)),
+            ebpf::JEQ32_REG if version.enable_jmp32() => Some(("jump", "jeq32", false)),
+            ebpf::JGT32_IMM if version.enable_jmp32() => Some(("jump", "jgt32", true)),
+            ebpf::JGT32_REG if version.enable_jmp32() => Some(("jump", "jgt32", false)),
+            ebpf::JGE32_IMM if version.enable_jmp32() => Some(("jump", "jge32", true)),
+            ebpf::JGE32_REG if version.enable_jmp32() => Some(("jump", "jge32", false)),
+            ebpf::JLT32_IMM if version.enable_jmp32() => Some(("jump", "jlt32", true)),
+            ebpf::JLT32_REG if version.enable_jmp32() => Some(("jump", "jlt32", false)),
+            ebpf::JLE32_IMM if version.enable_jmp32() => Some(("jump", "jle32", true)),
+            ebpf::JLE32_REG if version.enable_jmp32() => Some(("jump", "jle32", false)),
+            ebpf::JSET32_IMM if version.enable_jmp32() => Some(("jump", "jset32", true)),
+            ebpf::JSET32_REG if version.enable_jmp32() => Some(("jump", "jset32", false)),
+            ebpf::JNE32_IMM if version.enable_jmp32() => Some(("jump", "jne32", true)),
+            ebpf::JNE32_REG if version.enable_jmp32() => Some(("jump", "jne32", false)),
+            ebpf::JSGT32_IMM if version.enable_jmp32() => Some(("jump", "jsgt32", true)),
+            ebpf::JSGT32_REG if version.enable_jmp32() => Some(("jump", "jsgt32", false)),
+            ebpf::JSGE32_IMM if version.enable_jmp32() => Some(("jump", "jsge32", true)),
+            ebpf::JSGE32_REG if version.enable_jmp32() => Some(("jump", "jsge32", false)),
+            ebpf::JSLT32_IMM if version.enable_jmp32() => Some(("jump", "jslt32", true)),
+            ebpf::JSLT32_REG if version.enable_jmp32() => Some(("jump", "jslt32", false)),
+            ebpf::JSLE32_IMM if version.enable_jmp32() => Some(("jump", "jsle32", true)),
+            ebpf::JSLE32_REG if version.enable_jmp32() => Some(("jump", "jsle32", false)),
+
+            // JMP64
+            ebpf::JEQ64_IMM => Some(("jump", "jeq", true)),
+            ebpf::JEQ64_REG => Some(("jump", "jeq", false)),
+            ebpf::JGT64_IMM => Some(("jump", "jgt", true)),
+            ebpf::JGT64_REG => Some(("jump", "jgt", false)),
+            ebpf::JGE64_IMM => Some(("jump", "jge", true)),
+            ebpf::JGE64_REG => Some(("jump", "jge", false)),
+            ebpf::JLT64_IMM => Some(("jump", "jlt", true)),
+            ebpf::JLT64_REG => Some(("jump", "jlt", false)),
+            ebpf::JLE64_IMM => Some(("jump", "jle", true)),
+            ebpf::JLE64_REG => Some(("jump", "jle", false)),
+            ebpf::JSET64_IMM => Some(("jump", "jset", true)),
+            ebpf::JSET64_REG => Some(("jump", "jset", false)),
+            ebpf::JNE64_IMM => Some(("jump", "jne", true)),
+            ebpf::JNE64_REG => Some(("jump", "jne", false)),
+            ebpf::JSGT64_IMM => Some(("jump", "jsgt", true)),
+            ebpf::JSGT64_REG => Some(("jump", "jsgt", false)),
+            ebpf::JSGE64_IMM => Some(("jump", "jsge", true)),
+            ebpf::JSGE64_REG => Some(("jump", "jsge", false)),
+            ebpf::JSLT64_IMM => Some(("jump", "jslt", true)),
+            ebpf::JSLT64_REG => Some(("jump", "jslt", false)),
+            ebpf::JSLE64_IMM => Some(("jump", "jsle", true)),
+            ebpf::JSLE64_REG => Some(("jump", "jsle", false)),
+
+            // ── CALL / EXIT ─────────────────────────────────────────────────
+            ebpf::CALL_IMM => Some(("call", "call", true)),
+            ebpf::CALL_REG => Some(("call", "callx", false)),
+            ebpf::EXIT => Some(("call", "exit", false)),
+
+            _ => None,
+        }
+    }
+
+    fn resolve_account_addr(&self, vm_addr: u64) -> (Option<usize>, Option<u64>) {
+        for r in &self.vm.trace_config.account_ranges {
+            if vm_addr >= r.vm_start && vm_addr < r.vm_end {
+                return (Some(r.account_idx), Some(vm_addr - r.vm_start));
+            }
+        }
+        (None, None)
     }
 
     /// Advances the interpreter state by one instruction
@@ -1319,7 +1458,7 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
         if let Some(match_val) = self.alu_value_match {
             let new_dst = self.reg[dst];
             if new_dst == match_val && new_dst != _insn_dst_before {
-                if let Some((category, opcode_name)) = Self::classify_opcode(insn.opc) {
+                if let Some((category, opcode_name,is_imm)) = Self::classify_opcode(insn.opc,self.executable.get_sbpf_version()) {
                     if category == "alu" {
                         eprintln!(
                             "[SBPF_ALU_MATCH] PC={} (0x{:x}) {} r{}={} <- r{}={} imm={} | dst_before={}",
@@ -1342,20 +1481,22 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
             .map_or(true, |filter_pid| filter_pid == self.vm.trace_config.current_program_id);
 
         if passes_program_filter && _insn_trace_active {
-            if let Some((category, opcode_name)) = Self::classify_opcode(insn.opc) {
+            if let Some((category, opcode_name,is_imm)) = Self::classify_opcode(insn.opc,self.executable.get_sbpf_version()) {
                 let cats = &self.vm.trace_config.insn_categories;
                 let wanted = match category {
-                    "alu" => cats.alu,
-                    "jump" => cats.jump,
-                    "call" => cats.call,
-                    _ => false,
-                };
+                           "alu"  => cats.alu,
+                           "jump" => cats.jump,
+                           "call" => cats.call,
+                           "load" | "store" => cats.mem, // Catches both memory reads and writes
+                           _ => false,
+                       };
+
                 if wanted {
-                    let (branch_taken, branch_target) = if category == "jump" {
+                    let (branch_taken, branch_target) = if category == "jump" && opcode_name != "ja" {
                         let taken = next_pc != _insn_old_next_pc;
                         (Some(taken), if taken { Some(next_pc) } else { None })
                     } else {
-                        (None, None)
+                        (None, None)  // ja: no verdict, no target needed in the trace
                     };
                     let entry = crate::vm::InsnTraceEntry {
                         pc: self.reg[11],
@@ -1363,6 +1504,7 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
                         opcode: insn.opc,
                         opcode_name,
                         category,
+                        is_imm, // 3. Pass the boolean into the trace entry!
                         dst: insn.dst,
                         src: insn.src,
                         imm: insn.imm,
@@ -1667,4 +1809,3 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
         &self.vm.program_result
     }
 }
-

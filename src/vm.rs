@@ -274,6 +274,7 @@ pub struct InsnTraceEntry {
     pub opcode: u8,
     pub opcode_name: &'static str,
     pub category: &'static str,
+    pub is_imm: bool,
     pub dst: u8,
     pub src: u8,
     pub imm: i64,
@@ -348,6 +349,7 @@ pub struct InsnTraceCategories {
     pub call: bool,
     pub jump: bool,
     pub alu: bool,
+    pub mem: bool,
 }
 
 /// Trace filtering configuration set by the host
@@ -1103,4 +1105,3 @@ mod tests {
         check_slot!(env, register_trace, RegisterTrace);
     }
 }
-
