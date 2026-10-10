@@ -741,7 +741,7 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
         let dst = insn.dst as usize;
         let src = insn.src as usize;
 
-<<<<<<< HEAD
+
         if config.enable_register_tracing {
             self.vm.register_trace.push(self.reg);
         }
@@ -912,10 +912,10 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
         let _insn_dst_before = self.reg[dst];
         let _insn_src_val = self.reg[src];
         let _insn_old_next_pc = next_pc;
-=======
+
         #[cfg(feature = "tracer")]
         self.vm.register_trace.push(self.reg);
->>>>>>> origin/main
+
 
         match insn.opc {
             ebpf::LD_DW_IMM if !self.executable.get_sbpf_version().disable_lddw() => {
