@@ -742,9 +742,8 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
         let src = insn.src as usize;
 
 
-        if config.enable_register_tracing {
-            self.vm.register_trace.push(self.reg);
-        }
+        #[cfg(feature = "tracer")]
+               self.vm.register_trace.push(self.reg);
         // Memory patch: write a value to a specific address when PC matches
         for (patch_pc, patch_addr, patch_val) in &self.memory_patches {
             if self.reg[11] == *patch_pc {
